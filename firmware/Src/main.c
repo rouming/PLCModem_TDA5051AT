@@ -23,7 +23,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "usart.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -42,10 +42,7 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-TIM_HandleTypeDef htim2;
-
 UART_HandleTypeDef huart1;
-DMA_HandleTypeDef hdma_usart1_tx;
 
 /* USER CODE BEGIN PV */
 
@@ -54,15 +51,55 @@ DMA_HandleTypeDef hdma_usart1_tx;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_DMA_Init(void);
 static void MX_USART1_UART_Init(void);
-static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+struct pkt {
+	uint32_t seq;
+};
+
+struct ctx {
+	struct pkt pkt;
+	uint32_t seq;
+};
+
+static int handle_request(void *ctx_, uint8_t rx_len,
+			  void **tx_buf_out, uint8_t *tx_len_out)
+{
+	struct ctx *ctx = ctx_;
+	unsigned correct_seq;
+
+	if (rx_len != sizeof(ctx->pkt))
+		/* Wrong length */
+		return -1;
+
+	correct_seq = (ctx->seq + 1 == ctx->pkt.seq);
+	ctx->seq = ctx->pkt.seq;
+	if (!correct_seq)
+		return -1;
+
+	*tx_buf_out = (uint8_t *)&ctx->pkt;
+	*tx_len_out = sizeof(ctx->pkt);
+
+	return 0;
+}
+
+static int handle_response(void *ctx_, uint8_t rx_len)
+{
+	struct ctx *ctx = ctx_;
+
+	if (rx_len != sizeof(ctx->pkt))
+		/* Wrong length */
+		return -1;
+
+	return (ctx->seq == ctx->pkt.seq ? 0 : -1);
+}
+
 
 /* USER CODE END 0 */
 
@@ -73,9 +110,10 @@ static void MX_TIM2_Init(void);
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
+  struct ctx ctx = {
+	  .seq = 0,
+  };
   /* USER CODE END 1 */
-  
 
   /* MCU Configuration--------------------------------------------------------*/
 
@@ -95,17 +133,45 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_DMA_Init();
   MX_USART1_UART_Init();
-  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+  USART_Init(&huart1);
 
+  /* Power down to LOW */
+  HAL_GPIO_WritePin(GPIOB, PD_Pin, GPIO_PIN_RESET);
+  HAL_Delay(10);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1)
-  {
+  while (1) {
+	  int ret;
+
+	  if (HAL_GPIO_ReadPin(GPIOB, MASTER_LINK_Pin)) {
+		  /* Master */
+		  ctx.pkt.seq = ++ctx.seq;
+
+		  ret = USART_SendRecvSync(&ctx.pkt, sizeof(ctx.pkt), /* tx */
+					   &ctx.pkt, sizeof(ctx.pkt), /* rx */
+					   REPEAT_TX_REQS_x5);
+		  if (ret >= 0)
+			  ret = handle_response(&ctx, ret);
+	  } else {
+		  /* Slave */
+
+		  ret = USART_RecvSendSync(&ctx,
+					   &ctx.pkt, sizeof(ctx.pkt), /* rx */
+					   handle_request);
+	  }
+
+	  if (!ret) {
+		  HAL_GPIO_WritePin(GPIOC, BP_LED_Pin, GPIO_PIN_RESET);
+		  HAL_Delay(10);
+		  HAL_GPIO_WritePin(GPIOC, BP_LED_Pin, GPIO_PIN_SET);
+		  HAL_Delay(10);
+	  }
+
+	  USART_Process();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -147,51 +213,6 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief TIM2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_TIM2_Init(void)
-{
-
-  /* USER CODE BEGIN TIM2_Init 0 */
-
-  /* USER CODE END TIM2_Init 0 */
-
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-
-  /* USER CODE BEGIN TIM2_Init 1 */
-
-  /* USER CODE END TIM2_Init 1 */
-  htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 79;
-  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 99;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM2_Init 2 */
-
-  /* USER CODE END TIM2_Init 2 */
-
-}
-
-/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -207,7 +228,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 1200;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -221,22 +242,6 @@ static void MX_USART1_UART_Init(void)
   /* USER CODE BEGIN USART1_Init 2 */
 
   /* USER CODE END USART1_Init 2 */
-
-}
-
-/** 
-  * Enable DMA controller clock
-  */
-static void MX_DMA_Init(void) 
-{
-
-  /* DMA controller clock enable */
-  __HAL_RCC_DMA1_CLK_ENABLE();
-
-  /* DMA interrupt init */
-  /* DMA1_Channel4_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel4_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Channel4_IRQn);
 
 }
 

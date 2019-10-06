@@ -66,22 +66,28 @@ struct pkt {
 struct ctx {
 	struct pkt pkt;
 	uint32_t seq;
+	uint32_t seq_inited;
 };
 
 static int handle_request(void *ctx_, uint8_t rx_len,
 			  void **tx_buf_out, uint8_t *tx_len_out)
 {
 	struct ctx *ctx = ctx_;
-	unsigned correct_seq;
 
 	if (rx_len != sizeof(ctx->pkt))
 		/* Wrong length */
 		return -1;
 
-	correct_seq = (ctx->seq + 1 == ctx->pkt.seq);
+	if (ctx->seq_inited) {
+		int correct_seq = (ctx->seq + 1 == ctx->pkt.seq);
+
+		if (!correct_seq) {
+			ctx->seq_inited = 0;
+			return -1;
+		}
+	}
 	ctx->seq = ctx->pkt.seq;
-	if (!correct_seq)
-		return -1;
+	ctx->seq_inited = 1;
 
 	*tx_buf_out = (uint8_t *)&ctx->pkt;
 	*tx_len_out = sizeof(ctx->pkt);
